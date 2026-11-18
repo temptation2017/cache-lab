@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>cache-lab — HTTP 缓存新鲜度本地推演</title>
+  <meta name="description" content="在浏览器里粘贴 HTTP 缓存响应头，本地推演新鲜期、当前年龄，以及浏览器或 CDN 现在能不能复用。不上传。">
+  <style>
+    :root {
+      --bg: #10161a;
+      --bg-2: #171e24;
+      --paper: #1c252c;
+      --ink: #e6eef2;
+      --muted: #8b9aa4;
+      --line: #2b3841;
+      --fresh: #3ecfbf;
+      --fresh-dim: rgba(62, 207, 191, 0.16);
+      --swr: #e0b45c;
+      --swr-dim: rgba(224, 180, 92, 0.16);
+      --stale: #e06a5c;
+      --stale-dim: rgba(224, 106, 92, 0.16);
+      --info: #6ea8e8;
+      --info-dim: rgba(110, 168, 232, 0.14);
+      --needle: #f4f7f8;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: var(--bg);
+      color: var(--ink);
+    }
+    body {
+      font-family: "IBM Plex Sans", "Noto Sans SC", "Source Han Sans SC", "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei", sans-serif;
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+    .wrap { max-width: 1120px; margin: 0 auto; padding: 1.6rem 1.2rem 3rem; }
+    header h1 {
+      font-family: ui-monospace, "IBM Plex Mono", "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+      font-size: 1.35rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      margin: 0 0 0.35rem;
+    }
+    header h1 span.accent { color: var(--fresh); }
+    .badge {
+      display: inline-block;
+      margin-left: 0.5rem;
+      padding: 0.05rem 0.45rem;
+      border: 1px solid var(--fresh);
+      color: var(--fresh);
+      font-size: 0.7rem;
+      vertical-align: middle;
+      letter-spacing: 0.04em;
+    }
+    .lede { margin: 0; color: var(--muted); max-width: 48rem; }
+    .panel {
+      margin-top: 1.25rem;
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 0.9rem;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+    }
+    @media (max-width: 860px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+    .field-label, label.meta {
+      display: block;
+      color: var(--muted);
+      font-size: 0.78rem;
+      margin: 0 0 0.35rem;
+    }
+    .field { margin-top: 0.7rem; }
+    .field:first-child { margin-top: 0; }
+    input[type="text"], input[type="datetime-local"], select, textarea {
+      width: 100%;
+      background: var(--bg);
+      color: var(--ink);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 0.45rem 0.6rem;
+      font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+      font-size: 0.82rem;
+    }
+    textarea {
+      min-height: 180px;
+      resize: vertical;
+      line-height: 1.45;
+      padding: 0.7rem 0.8rem;
+      font-size: 0.78rem;
+    }
+    input:focus, select:focus, textarea:focus {
+      outline: 2px solid var(--fresh);
+      outline-offset: 1px;
+    }
+    .row2, .row3 {
+      display: grid;
+      gap: 0.6rem;
+    }
+    .row2 { grid-template-columns: 1fr 1fr; }
+    .row3 { grid-template-columns: 1fr 1fr 1fr; }
+    @media (max-width: 640px) {
+      .row2, .row3 { grid-template-columns: 1fr; }
+    }
+    .samples, .jumps, .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+      margin-top: 0.7rem;
+    }
+    button {
+      appearance: none;
+      background: var(--bg-2);
+      color: var(--ink);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 0.28rem 0.7rem;
+      font: inherit;
+      font-size: 0.78rem;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--fresh); }
+    button.primary {
+      background: var(--fresh-dim);
+      border-color: var(--fresh);
+      color: var(--fresh);
+    }
+    .verdict {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+      padding: 0.85rem 1rem;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+    }
+    .verdict.fresh, .verdict.heuristic-fresh {
+      background: var(--fresh-dim);
+      border-color: var(--fresh);
+    }
+    .verdict.stale-swr, .verdict.stale-max-stale {
+      background: var(--swr-dim);
+      border-color: var(--swr);
+    }
+    .verdict.stale, .verdict.not-stored, .verdict.must-revalidate {
+      background: var(--stale-dim);
+      border-color: var(--stale);
+    }
+    .verdict .kicker {
+      font-size: 0.72rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .verdict strong { font-size: 1.15rem; font-weight: 650; }
+    .verdict p { margin: 0.15rem 0 0; color: var(--ink); }
+    .tape { margin-top: 0.9rem; }
+    .tape-track {
+      position: relative;
+      height: 28px;
+      background: #12181c;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .seg {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+    }
+    .seg.fresh { background: rgba(62, 207, 191, 0.45); }
+    .seg.swr { background: rgba(224, 180, 92, 0.45); }
+    .seg.sie { background: rgba(224, 106, 92, 0.28); }
+    .needle {
+      position: absolute;
+      top: -3px;
+      bottom: -3px;
+      width: 2px;
+      background: var(--needle);
+      box-shadow: 0 0 0 3px rgba(244, 247, 248, 0.15);
+      z-index: 2;
+    }
+    .needle span {
+      position: absolute;
+      top: -1.15rem;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 0.68rem;
+      color: var(--needle);
+      white-space: nowrap;
+    }
+    .tape-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.7rem 1rem;
+      margin-top: 0.45rem;
+      color: var(--muted);
+      font-size: 0.75rem;
+    }
+    .dot {
+      display: inline-block;
+      width: 0.6rem;
+      height: 0.6rem;
+      border-radius: 2px;
+      margin-right: 0.3rem;
+      vertical-align: -0.05rem;
+    }
+    .dot.fresh { background: var(--fresh); }
+    .dot.swr { background: var(--swr); }
+    .dot.sie { background: #c56b62; }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 0.6rem;
+      margin-top: 0.9rem;
+    }
+    @media (max-width: 800px) {
+      .metrics { grid-template-columns: 1fr 1fr; }
+    }
+    .metric {
+      background: var(--bg);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 0.55rem 0.65rem;
+    }
+    .metric .lbl { color: var(--muted); font-size: 0.72rem; }
+    .metric .val {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 0.92rem;
+      margin-top: 0.15rem;
+    }
+    .metric .sub { color: var(--muted); font-size: 0.72rem; margin-top: 0.15rem; }
+    h2 {
+      font-size: 0.82rem;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin: 1rem 0 0.45rem;
+    }
+    ul.notes, ul.dirs, ul.reval {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+    ul.notes li, ul.reval li, .err {
+      padding: 0.4rem 0.55rem;
+      border-radius: 6px;
+      margin-bottom: 0.35rem;
+      font-size: 0.84rem;
+    }
+    ul.notes li.warn, .err { background: var(--stale-dim); }
+    ul.notes li.info { background: var(--info-dim); }
+    ul.dirs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+    }
+    ul.dirs li {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 0.75rem;
+      padding: 0.2rem 0.45rem;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: var(--bg);
+    }
+    .times { color: var(--muted); font-size: 0.78rem; margin-top: 0.35rem; }
+    .foot {
+      margin-top: 1.4rem;
+      color: var(--muted);
+      font-size: 0.78rem;
+    }
+    .foot a { color: var(--fresh); }
+    .copy-ok { color: var(--fresh); font-size: 0.78rem; margin-left: 0.4rem; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>cache-lab <span class="accent">HTTP 新鲜度</span><span class="badge">本地 · 不上传</span></h1>
+      <p class="lede">把响应里的 <code>Cache-Control</code>、<code>Age</code>、<code>Expires</code>、<code>Date</code> 等头贴进来，在浏览器里推演：这份副本现在新不新鲜、还要多久过期、浏览器和 CDN 的结论会不会不一样。全部本地计算，不会上传，也不会向源站发请求。</p>
+    </header>
+
+    <div class="panel">
+      <div class="field-label">常见场景</div>
+      <div class="samples" id="samples"></div>
+    </div>
+
+    <div class="grid">
+      <div class="panel">
+        <div class="row3">
+          <div class="field">
+            <label class="meta" for="kind">缓存类型</label>
+            <select id="kind">
+              <option value="private">私有（浏览器）</option>
+              <option value="shared">共享（CDN / 代理）</option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="meta" for="method">请求方法</label>
+            <select id="method">
+              <option>GET</option>
+              <option>HEAD</option>
+              <option>POST</option>
+              <option>PUT</option>
+              <option>DELETE</option>
+              <option>PATCH</option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="meta" for="now">观测时刻</label>
+            <input id="now" type="datetime-local" step="1">
+          </div>
+        </div>
+        <div class="field">
+          <label class="meta" for="received">收到响应的时刻（默认与观测时刻相同，表示刚刚收到）</label>
+          <input id="received" type="datetime-local" step="1">
+        </div>
+        <div class="jumps">
+          <button type="button" data-jump="0" id="btn-now">用当前时间</button>
+          <button type="button" data-jump="60">观测点 +1 分钟</button>
+          <button type="button" data-jump="600">+10 分钟</button>
+          <button type="button" data-jump="3600">+1 小时</button>
+        </div>
+        <div class="field">
+          <label class="meta" for="response">响应头</label>
+          <textarea id="response" spellcheck="false" placeholder="HTTP/1.1 200 OK&#10;Date: Wed, 18 Nov 2026 12:00:00 GMT&#10;Cache-Control: public, max-age=300&#10;ETag: &quot;abc&quot;"></textarea>
+        </div>
+        <div class="field">
+          <label class="meta" for="request">请求头（可选，用来看 Authorization、请求侧 Cache-Control）</label>
+          <textarea id="request" spellcheck="false" placeholder="GET /app.css HTTP/1.1&#10;Cache-Control: max-age=0" style="min-height: 90px;"></textarea>
+        </div>
+      </div>
+
+      <div class="panel" id="out">
+        <div id="verdict"></div>
+        <div class="tape" id="tape" hidden>
+          <div class="tape-track" id="track"></div>
+          <div class="tape-legend">
+            <span><i class="dot fresh"></i>新鲜期</span>
+            <span><i class="dot swr"></i>stale-while-revalidate</span>
+            <span><i class="dot sie"></i>stale-if-error</span>
+          </div>
+        </div>
+        <div class="metrics" id="metrics"></div>
+        <div id="dirs"></div>
+        <div id="reval"></div>
+        <div id="notes"></div>
+        <div id="errors"></div>
+        <div class="actions">
+          <button type="button" class="primary" id="copy">复制 Markdown 摘要</button>
+          <span class="copy-ok" id="copied" hidden>已复制</span>
+        </div>
+      </div>
+    </div>
+
+    <p class="foot">
+      计算大致遵循 <a href="https://www.rfc-editor.org/rfc/rfc9111.html">RFC 9111</a>（HTTP 缓存）和 <a href="https://www.rfc-editor.org/rfc/rfc8246.html">RFC 8246</a>（immutable）。启发式新鲜期采用常见实现：<code>(Date − Last-Modified) × 10%</code>，并封顶 24 小时。不模拟具体浏览器或某家 CDN 的私有规则，结论供对照规范，不是抓包实测。
+      源码：<a href="https://github.com/temptation2017/cache-lab">temptation2017/cache-lab</a>
+    </p>
+  </div>
+  <script src="cache.js"></script>
+  <script>
+    (function () {
+      var kind = document.getElementById('kind');
+      var method = document.getElementById('method');
+      var nowEl = document.getElementById('now');
+      var recvEl = document.getElementById('received');
+      var response = document.getElementById('response');
+      var request = document.getElementById('request');
+      var samplesEl = document.getElementById('samples');
+      var copied = document.getElementById('copied');
+
+      function pad(n) { return n < 10 ? '0' + n : String(n); }
+
+      function toLocalInput(ms) {
+        var d = new Date(ms);
+        return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+          'T' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+      }
+
+      function fromLocalInput(s) {
+        if (!s) return null;
+        var t = new Date(s).getTime();
+        return isFinite(t) ? t : null;
+      }
+
+      function clear(node) {
+        while (node.firstChild) node.removeChild(node.firstChild);
+      }
+
+      function el(tag, cls, text) {
+        var n = document.createElement(tag);
+        if (cls) n.className = cls;
+        if (text != null) n.textContent = text;
+        return n;
+      }
+
+      function pct(t, start, span) {
+        var p = ((t - start) / span) * 100;
+        if (p < 0) p = 0;
+        if (p > 100) p = 100;
+        return p;
+      }
+
+      function fillSample(key) {
+        var s = CacheLab.samples[key];
+        if (!s) return;
+        kind.value = s.cacheKind;
+        method.value = s.method || 'GET';
+        response.value = s.responseText;
+        request.value = s.requestHeadersText || '';
+        var nowMs = CacheLab.parseHttpDate(s.now) || Date.now();
+        var recvMs = CacheLab.parseHttpDate(s.receivedAt) || nowMs;
+        nowEl.value = toLocalInput(nowMs);
+        recvEl.value = toLocalInput(recvMs);
+        render();
+      }
+
+      function currentInput() {
+        var nowMs = fromLocalInput(nowEl.value) || Date.now();
+        var recvMs = fromLocalInput(recvEl.value);
+        if (recvMs == null) recvMs = nowMs;
+        return {
+          responseText: response.value,
+          requestHeadersText: request.value,
+          cacheKind: kind.value,
+          method: method.value,
+          now: nowMs,
+          receivedAt: recvMs
+        };
+      }
+
+      function renderTape(r) {
+        var tape = document.getElementById('tape');
+        var track = document.getElementById('track');
+        clear(track);
+        var points = [r.now, r.receivedAt];
+        if (r.dateMs != null) points.push(r.dateMs);
+        if (r.freshUntil != null) points.push(r.freshUntil);
+        if (r.swrUntil != null) points.push(r.swrUntil);
+        if (r.sieUntil != null) points.push(r.sieUntil);
+        var min = Math.min.apply(null, points);
+        var max = Math.max.apply(null, points);
+        if (min === max) max = min + 60 * 1000;
+        var padMs = Math.max(30 * 1000, (max - min) * 0.08);
+        var start = min - padMs;
+        var end = max + padMs;
+        var span = end - start;
+
+        var origin = r.dateMs != null ? r.dateMs : (r.receivedAt - r.age.correctedInitialAge * 1000);
+        if (r.freshUntil != null) {
+          var fresh = el('div', 'seg fresh');
+          fresh.style.left = pct(origin, start, span) + '%';
+          fresh.style.width = Math.max(0, pct(r.freshUntil, start, span) - pct(origin, start, span)) + '%';
+          track.appendChild(fresh);
+        }
+        if (r.freshUntil != null && r.swrUntil != null && r.swrUntil > r.freshUntil) {
+          var swr = el('div', 'seg swr');
+          swr.style.left = pct(r.freshUntil, start, span) + '%';
+          swr.style.width = Math.max(0, pct(r.swrUntil, start, span) - pct(r.freshUntil, start, span)) + '%';
+          track.appendChild(swr);
+        }
+        if (r.swrUntil != null && r.sieUntil != null && r.sieUntil > r.swrUntil) {
+          var sie = el('div', 'seg sie');
+          sie.style.left = pct(r.swrUntil, start, span) + '%';
+          sie.style.width = Math.max(0, pct(r.sieUntil, start, span) - pct(r.swrUntil, start, span)) + '%';
+          track.appendChild(sie);
+        } else if (r.freshUntil != null && r.sieUntil != null && r.sieUntil > r.freshUntil && !r.swrUntil) {
+          var sie2 = el('div', 'seg sie');
+          sie2.style.left = pct(r.freshUntil, start, span) + '%';
+          sie2.style.width = Math.max(0, pct(r.sieUntil, start, span) - pct(r.freshUntil, start, span)) + '%';
+          track.appendChild(sie2);
+        }
+        var needle = el('div', 'needle');
+        needle.style.left = pct(r.now, start, span) + '%';
+        needle.appendChild(el('span', '', '现在'));
+        track.appendChild(needle);
+        tape.hidden = false;
+      }
+
+      function renderDirs(r, host) {
+        clear(host);
+        var names = Object.keys(r.cc.directives);
+        if (!names.length) return;
+        host.appendChild(el('h2', '', 'Cache-Control'));
+        var ul = el('ul', 'dirs');
+        names.forEach(function (name) {
+          var d = r.cc.directives[name];
+          var label = name;
+          if (typeof d.value === 'number') label += '=' + d.value;
+          else if (d.fields && d.fields.length) label += '="' + d.fields.join(', ') + '"';
+          else if (d.any) label += '（任意）';
+          ul.appendChild(el('li', '', label));
+        });
+        host.appendChild(ul);
+      }
+
+      function render() {
+        var r = CacheLab.analyze(currentInput());
+        var box = document.getElementById('verdict');
+        clear(box);
+        var v = el('div', 'verdict ' + r.verdict);
+        v.appendChild(el('div', 'kicker', r.cacheKind === 'shared' ? '共享缓存判定' : '浏览器缓存判定'));
+        v.appendChild(el('strong', '', r.verdictLabel));
+        v.appendChild(el('p', '', r.verdictDetail));
+        box.appendChild(v);
+
+        renderTape(r);
+
+        var metrics = document.getElementById('metrics');
+        clear(metrics);
+        function metric(lbl, val, sub) {
+          var m = el('div', 'metric');
+          m.appendChild(el('div', 'lbl', lbl));
+          m.appendChild(el('div', 'val', val));
+          if (sub) m.appendChild(el('div', 'sub', sub));
+          metrics.appendChild(m);
+        }
+        metric('当前年龄', CacheLab.formatDuration(r.age.currentAge),
+          'apparent ' + CacheLab.formatDuration(r.age.apparentAge) +
+          ' · Age 头 ' + (r.age.ageHeader == null ? '无' : CacheLab.formatDuration(r.age.ageHeader)) +
+          ' · 驻留 ' + CacheLab.formatDuration(r.age.residentTime));
+        metric('新鲜期', r.freshness.lifetime == null ? '无' : CacheLab.formatDuration(r.freshness.lifetime),
+          '来源：' + CacheLab.sourceLabel(r.freshness.source));
+        metric('剩余 / 已过期', r.freshness.remaining == null ? '—' : CacheLab.formatDuration(r.freshness.remaining),
+          r.freshUntil != null ? r.times.freshUntilCn : '');
+        metric('观测时刻', r.times.nowCn, r.times.nowGmt);
+
+        renderDirs(r, document.getElementById('dirs'));
+
+        var reval = document.getElementById('reval');
+        clear(reval);
+        reval.appendChild(el('h2', '', '再验证'));
+        reval.appendChild(el('p', 'times', r.revalidation.note));
+        if (r.revalidation.headers.length) {
+          var ul = el('ul', 'reval');
+          r.revalidation.headers.forEach(function (h) { ul.appendChild(el('li', '', h)); });
+          reval.appendChild(ul);
+        }
+
+        var notes = document.getElementById('notes');
+        clear(notes);
+        if (r.notes.length) {
+          notes.appendChild(el('h2', '', '注意'));
+          var nl = el('ul', 'notes');
+          r.notes.forEach(function (n) {
+            nl.appendChild(el('li', n.level || 'info', n.text));
+          });
+          notes.appendChild(nl);
+        }
+
+        var errors = document.getElementById('errors');
+        clear(errors);
+        if (r.parseErrors.length) {
+          errors.appendChild(el('h2', '', '解析问题'));
+          r.parseErrors.forEach(function (e) { errors.appendChild(el('div', 'err', e)); });
+        }
+
+        document.getElementById('copy').onclick = function () {
+          var text = r.markdown;
+          function ok() {
+            copied.hidden = false;
+            setTimeout(function () { copied.hidden = true; }, 1500);
+          }
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(ok).catch(function () {
+              window.prompt('复制以下摘要', text);
+            });
+          } else {
+            window.prompt('复制以下摘要', text);
+          }
+        };
+      }
+
+      Object.keys(CacheLab.samples).forEach(function (key) {
+        var b = el('button', '', CacheLab.samples[key].label);
+        b.type = 'button';
+        b.addEventListener('click', function () { fillSample(key); });
+        samplesEl.appendChild(b);
+      });
+
+      document.getElementById('btn-now').addEventListener('click', function (ev) {
+        ev.preventDefault();
+        var t = Date.now();
+        nowEl.value = toLocalInput(t);
+        recvEl.value = toLocalInput(t);
+        render();
+      });
+      document.querySelectorAll('.jumps [data-jump]').forEach(function (btn) {
+        if (btn.id === 'btn-now') return;
+        btn.addEventListener('click', function () {
+          var recv = fromLocalInput(recvEl.value) || Date.now();
+          var sec = parseInt(btn.getAttribute('data-jump'), 10);
+          nowEl.value = toLocalInput(recv + sec * 1000);
+          render();
+        });
+      });
+
+      ['kind', 'method', 'now', 'received', 'response', 'request'].forEach(function (id) {
+        document.getElementById(id).addEventListener('input', render);
+        document.getElementById(id).addEventListener('change', render);
+      });
+
+      fillSample('cdnFresh');
+    })();
+  </script>
+</body>
+</html>
